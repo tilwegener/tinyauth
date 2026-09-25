@@ -379,22 +379,6 @@ func (controller *OIDCController) skipConsent(c *gin.Context) {
 		return
 	}
 
-	client, ok := controller.oidc.GetClient(authorizeReq.ClientID)
-	if ok && client.Trusted {
-		redirectURI, err := controller.completeAuthorization(c.Request.Context(), req.OIDCTicket, authorizeReq, userContext, false)
-		if err != nil {
-			controller.writeCompleteAuthorizationError(c, authorizeReq, err)
-			return
-		}
-		controller.oidc.StoreCompletedAuthorizeRequest(req.OIDCTicket, userContext.GetUsername(), redirectURI)
-
-		c.JSON(200, SkipConsentResponse{
-			SkipConsent: true,
-			RedirectURI: redirectURI,
-		})
-		return
-	}
-
 	consent, err := controller.oidc.GetOIDCConsent(c, userContext.GetUsername(), authorizeReq.ClientID)
 
 	if err != nil || consent == nil {
