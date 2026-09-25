@@ -381,6 +381,19 @@ func TestOIDCController(t *testing.T) {
 				assert.ErrorIs(t, err, repository.ErrNotFound)
 				_, ok := oidcService.GetAuthorizeRequestByTicket(ticket)
 				assert.False(t, ok)
+				_, ok = oidcService.GetCompletedAuthorizeRequest(ticket, "otheruser")
+				assert.False(t, ok)
+
+				retryRecorder := httptest.NewRecorder()
+				retryReq := httptest.NewRequest("GET", "/api/oidc/skip-consent?oidc_ticket="+url.QueryEscape(ticket), nil)
+				router.ServeHTTP(retryRecorder, retryReq)
+
+				assert.Equal(t, http.StatusOK, retryRecorder.Code)
+
+				var retryRes SkipConsentResponse
+				require.NoError(t, json.Unmarshal(retryRecorder.Body.Bytes(), &retryRes))
+				assert.True(t, retryRes.SkipConsent)
+				assert.Equal(t, res.RedirectURI, retryRes.RedirectURI)
 			},
 		},
 		{
