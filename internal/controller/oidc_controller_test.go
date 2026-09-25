@@ -372,6 +372,38 @@ func TestOIDCController(t *testing.T) {
 				var res SkipConsentResponse
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &res))
 				assert.True(t, res.SkipConsent)
+				assert.Contains(t, res.RedirectURI, "https://trusted.example.com/callback?code=")
+
+				_, err := store.GetOIDCConsentByUsernameAndClientID(ctx, repository.GetOIDCConsentByUsernameAndClientIDParams{
+					Username: "testuser",
+					ClientID: "trusted-client-id",
+				})
+				assert.ErrorIs(t, err, repository.ErrNotFound)
+				_, ok := oidcService.GetAuthorizeRequestByTicket(ticket)
+				assert.False(t, ok)
+			},
+		},
+		{
+			description: "Skip consent returns false for a trusted client when prompt includes login",
+			middlewares: []gin.HandlerFunc{authedUser},
+			run: func(t *testing.T, router *gin.Engine, recorder *httptest.ResponseRecorder) {
+				ticket := oidcService.CreateAuthorizeRequestTicket(service.AuthorizeRequest{
+					Scope:        "openid profile",
+					ResponseType: "code",
+					ClientID:     "trusted-client-id",
+					RedirectURI:  "https://trusted.example.com/callback",
+					Prompt:       "login consent",
+				})
+
+				req := httptest.NewRequest("GET", "/api/oidc/skip-consent?oidc_ticket="+url.QueryEscape(ticket), nil)
+				router.ServeHTTP(recorder, req)
+
+				assert.Equal(t, http.StatusOK, recorder.Code)
+
+				var res SkipConsentResponse
+				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &res))
+				assert.False(t, res.SkipConsent)
+				assert.Empty(t, res.RedirectURI)
 			},
 		},
 		{

@@ -74,7 +74,8 @@ type SkipConsentRequest struct {
 }
 
 type SkipConsentResponse struct {
-	SkipConsent bool `json:"skipConsent"`
+	SkipConsent bool   `json:"skipConsent"`
+	RedirectURI string `json:"redirectUri,omitempty"`
 }
 
 type AuthorizeScreenParams struct {
@@ -318,9 +319,10 @@ func (controller *OIDCController) skipConsent(c *gin.Context) {
 		return
 	}
 
-	controller.log.App.Debug().Str("client", authorizeReq.ClientID).Str("user", userContext.GetUsername()).Msg("User consented to OIDC")
+	controller.log.App.Debug().Str("client", authorizeReq.ClientID).Str("user", userContext.GetUsername()).Msg("Checking OIDC consent")
 
-	if authorizeReq.Prompt == service.OIDCPromptLogin.String() {
+	prompts := controller.oidc.GetPrompt(authorizeReq.Prompt)
+	if slices.Contains(prompts, service.OIDCPromptLogin) {
 		c.JSON(200, SkipConsentResponse{
 			SkipConsent: false,
 		})
@@ -329,8 +331,14 @@ func (controller *OIDCController) skipConsent(c *gin.Context) {
 
 	client, ok := controller.oidc.GetClient(authorizeReq.ClientID)
 	if ok && client.Trusted {
+		redirectURI, completed := controller.completeAuthorization(c, req.OIDCTicket, authorizeReq, userContext, false)
+		if !completed {
+			return
+		}
+
 		c.JSON(200, SkipConsentResponse{
 			SkipConsent: true,
+			RedirectURI: redirectURI,
 		})
 		return
 	}
@@ -419,8 +427,20 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 		return
 	}
 
+	redirectURI, completed := controller.completeAuthorization(c, req.Ticket, authorizeReq, userContext, true)
+	if !completed {
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"status":       200,
+		"redirect_uri": redirectURI,
+	})
+}
+
+func (controller *OIDCController) completeAuthorization(c *gin.Context, ticket string, authorizeReq *service.AuthorizeRequest, userContext *model.UserContext, persistConsent bool) (string, bool) {
 	// We no longer need the ticket
-	controller.oidc.DeleteAuthorizeRequestTicket(req.Ticket)
+	controller.oidc.DeleteAuthorizeRequestTicket(ticket)
 
 	// Get the client
 	client, ok := controller.oidc.GetClient(authorizeReq.ClientID)
@@ -432,14 +452,14 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 			reasonPublic: "The client is not configured",
 			json:         true,
 		})
-		return
+		return "", false
 	}
 
 	// Create the sub to find and delete old sessions
 	sub := controller.oidc.CreateSub(*userContext, authorizeReq.ClientID)
 
 	// Before storing the code, delete old session
-	err = controller.oidc.DeleteOldSession(c, sub)
+	err := controller.oidc.DeleteOldSession(c, sub)
 	if err != nil {
 		controller.authorizeError(c, authorizeErrorParams{
 			err:           err,
@@ -450,7 +470,7 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 			state:         authorizeReq.State,
 			json:          true,
 		})
-		return
+		return "", false
 	}
 
 	// Create the authorization code
@@ -465,12 +485,14 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 			reasonPublic: "Failed to parse redirect URI",
 			json:         true,
 		})
-		return
+		return "", false
 	}
 
-	// Store the consent granted by the user for this client
-	if _, err := controller.oidc.UpsertOIDCConsent(c, userContext.GetUsername(), authorizeReq.Scope, client.ClientID); err != nil {
-		controller.log.App.Warn().Err(err).Msg("Failed to store OIDC consent")
+	if persistConsent {
+		// Only store consent when the user explicitly approved the request.
+		if _, err := controller.oidc.UpsertOIDCConsent(c, userContext.GetUsername(), authorizeReq.Scope, client.ClientID); err != nil {
+			controller.log.App.Warn().Err(err).Msg("Failed to store OIDC consent")
+		}
 	}
 
 	q := cu.Query()
@@ -483,10 +505,7 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 
 	cu.RawQuery = q.Encode()
 
-	c.JSON(200, gin.H{
-		"status":       200,
-		"redirect_uri": cu.String(),
-	})
+	return cu.String(), true
 }
 
 func (controller *OIDCController) Token(c *gin.Context) {
