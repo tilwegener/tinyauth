@@ -339,6 +339,45 @@ func (controller *OIDCController) skipConsent(c *gin.Context) {
 		})
 		return
 	}
+	if authorizeReq.MaxAge != "" {
+		maxAge, err := strconv.Atoi(authorizeReq.MaxAge)
+		if err != nil || time.Unix(userContext.AuthTime, 0).Add(time.Duration(maxAge)*time.Second).Before(time.Now()) {
+			c.JSON(200, SkipConsentResponse{
+				SkipConsent: false,
+			})
+			return
+		}
+	}
+
+	client, ok := controller.oidc.GetClient(authorizeReq.ClientID)
+	if ok && client.Trusted {
+		authorizeReq, claimed := controller.oidc.ClaimAuthorizeRequestTicket(req.OIDCTicket)
+		if !claimed {
+			if redirectURI, completed := controller.oidc.GetCompletedAuthorizeRequest(req.OIDCTicket, userContext.GetUsername()); completed {
+				c.JSON(200, SkipConsentResponse{
+					SkipConsent: true,
+					RedirectURI: redirectURI,
+				})
+				return
+			}
+
+			c.JSON(200, SkipConsentResponse{SkipConsent: false})
+			return
+		}
+
+		redirectURI, err := controller.completeAuthorization(c.Request.Context(), authorizeReq, userContext, false)
+		if err != nil {
+			controller.writeCompleteAuthorizationError(c, authorizeReq, err)
+			return
+		}
+		controller.oidc.StoreCompletedAuthorizeRequest(req.OIDCTicket, userContext.GetUsername(), redirectURI)
+
+		c.JSON(200, SkipConsentResponse{
+			SkipConsent: true,
+			RedirectURI: redirectURI,
+		})
+		return
+	}
 
 	client, ok := controller.oidc.GetClient(authorizeReq.ClientID)
 	if ok && client.Trusted {
@@ -428,7 +467,7 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 		return
 	}
 
-	authorizeReq, ok := controller.oidc.GetAuthorizeRequestByTicket(req.Ticket)
+	authorizeReq, ok := controller.oidc.ClaimAuthorizeRequestTicket(req.Ticket)
 
 	if !ok {
 		controller.authorizeError(c, authorizeErrorParams{
@@ -440,7 +479,7 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 		return
 	}
 
-	redirectURI, err := controller.completeAuthorization(c.Request.Context(), req.Ticket, authorizeReq, userContext, true)
+	redirectURI, err := controller.completeAuthorization(c.Request.Context(), authorizeReq, userContext, true)
 	if err != nil {
 		controller.writeCompleteAuthorizationError(c, authorizeReq, err)
 		return
@@ -452,10 +491,7 @@ func (controller *OIDCController) authorizeComplete(c *gin.Context) {
 	})
 }
 
-func (controller *OIDCController) completeAuthorization(ctx context.Context, ticket string, authorizeReq *service.AuthorizeRequest, userContext *model.UserContext, persistConsent bool) (string, error) {
-	// We no longer need the ticket
-	controller.oidc.DeleteAuthorizeRequestTicket(ticket)
-
+func (controller *OIDCController) completeAuthorization(ctx context.Context, authorizeReq *service.AuthorizeRequest, userContext *model.UserContext, persistConsent bool) (string, error) {
 	// Get the client
 	client, ok := controller.oidc.GetClient(authorizeReq.ClientID)
 

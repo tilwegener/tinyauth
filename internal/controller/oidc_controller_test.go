@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -417,6 +419,63 @@ func TestOIDCController(t *testing.T) {
 				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &res))
 				assert.False(t, res.SkipConsent)
 				assert.Empty(t, res.RedirectURI)
+			},
+		},
+		{
+			description: "Skip consent returns false for a trusted client when max age is exceeded",
+			middlewares: []gin.HandlerFunc{
+				func(c *gin.Context) {
+					c.Set("context", &model.UserContext{
+						Authenticated: true,
+						AuthTime:      time.Now().Add(-time.Hour).Unix(),
+						Provider:      model.ProviderLocal,
+						Local: &model.LocalContext{
+							BaseContext: model.BaseContext{Username: "testuser"},
+						},
+					})
+				},
+			},
+			run: func(t *testing.T, router *gin.Engine, recorder *httptest.ResponseRecorder) {
+				ticket := oidcService.CreateAuthorizeRequestTicket(service.AuthorizeRequest{
+					Scope:        "openid profile",
+					ResponseType: "code",
+					ClientID:     "trusted-client-id",
+					RedirectURI:  "https://trusted.example.com/callback",
+					MaxAge:       "60",
+				})
+
+				req := httptest.NewRequest("GET", "/api/oidc/skip-consent?oidc_ticket="+url.QueryEscape(ticket), nil)
+				router.ServeHTTP(recorder, req)
+
+				assert.Equal(t, http.StatusOK, recorder.Code)
+
+				var res SkipConsentResponse
+				require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &res))
+				assert.False(t, res.SkipConsent)
+				assert.Empty(t, res.RedirectURI)
+				_, ok := oidcService.GetAuthorizeRequestByTicket(ticket)
+				assert.True(t, ok)
+			},
+		},
+		{
+			description: "Authorize request ticket can only be claimed once",
+			run: func(t *testing.T, _ *gin.Engine, _ *httptest.ResponseRecorder) {
+				ticket := oidcService.CreateAuthorizeRequestTicket(service.AuthorizeRequest{ClientID: "trusted-client-id"})
+				var claims atomic.Int32
+				var wg sync.WaitGroup
+
+				for range 16 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						if _, ok := oidcService.ClaimAuthorizeRequestTicket(ticket); ok {
+							claims.Add(1)
+						}
+					}()
+				}
+
+				wg.Wait()
+				assert.Equal(t, int32(1), claims.Load())
 			},
 		},
 		{
